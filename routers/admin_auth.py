@@ -23,6 +23,9 @@ JWT_ALGORITHM = "HS256"
 ADMIN_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 
 
+from typing import Optional
+
+
 class AdminLoginRequest(BaseModel):
     username: str
     password: str
@@ -31,13 +34,13 @@ class AdminLoginRequest(BaseModel):
 class AdminLoginResponse(BaseModel):
     success: bool
     message: str
-    access_token: str = None
-    admin: dict = None
+    access_token: Optional[str] = None
+    admin: Optional[dict] = None
 
 
 class AdminSessionResponse(BaseModel):
     authenticated: bool
-    admin: dict = None
+    admin: Optional[dict] = None
 
 
 def create_admin_token(username: str) -> str:
