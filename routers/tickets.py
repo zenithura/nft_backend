@@ -1,0 +1,767 @@
+"""Tickets management router."""
+from fastapi import APIRouter, HTTPException, Depends
+from typing import List, Optional
+from supabase import Client
+import sys
+from pathlib import Path
+
+from database import get_supabase_admin
+from database import get_supabase_admin
+from models import TicketCreate, TicketResponse, MintRequest, ValidatorRequest, ValidateRequest
+from web3_client import contracts, send_transaction, w3, account
+from web3 import Web3
+from cache import get as cache_get, set as cache_set, clear as cache_clear
+
+# Import ML services for fraud detection
+_ml_integration = None
+def get_ml_integration():
+    """Lazy import ML integration from Machine Learning folder."""
+    global _ml_integration
+    if _ml_integration is None:
+        try:
+            ml_path = Path(__file__).parent.parent.parent / "Machine Learning"
+            if ml_path.exists():
+                sys.path.insert(0, str(ml_path.parent))
+                from integration.ml_integration_backend import get_ml_integration_backend
+                # Pass Supabase client - will be set when called with db dependency
+                _ml_integration = get_ml_integration_backend()
+        except Exception as e:
+            import logging
+            logging.warning(f"ML integration not available: {e}")
+            _ml_integration = None  # ML services optional
+    return _ml_integration
+
+router = APIRouter(prefix="/tickets", tags=["Tickets"])
+
+
+
+@router.get("/server-address")
+def get_server_address():
+    """Get the server's wallet address."""
+    if account:
+        return {"address": account.address}
+    return {"address": None}
+
+@router.post("/", response_model=TicketResponse)
+async def create_ticket(
+    ticket: TicketCreate,
+    db: Client = Depends(get_supabase_admin)
+):
+    """Create/mint a new ticket with optional fraud detection."""
+    try:
+        # Optional: Run fraud detection if ML services available
+        ml_integration = get_ml_integration()
+        if ml_integration:
+            try:
+                import uuid
+                transaction_id = str(uuid.uuid4())
+                price_paid = float(ticket.purchase_price) if hasattr(ticket, 'purchase_price') and ticket.purchase_price else 0.0
+                
+                # Update ML integration with Supabase client
+                ml_integration.feature_engineer._db_client = db
+                
+                fraud_check = ml_integration.process_transaction(
+                    transaction_id=transaction_id,
+                    wallet_address=ticket.owner_address,
+                    event_id=ticket.event_id,
+                    price_paid=price_paid
+                )
+                
+                # Check fraud detection result - new integration returns 'fraud_detection' key
+                fraud_detection = fraud_check.get('fraud_detection', {})
+                fraud_probability = fraud_detection.get('fraud_probability', 0.0)
+                
+                # Block if fraud detected or high risk
+                if fraud_check.get('status') == 'blocked' or fraud_probability > 0.85:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Transaction flagged as high risk (probability: {fraud_probability:.2f}). Please contact support."
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                # Don't fail ticket creation if ML check fails
+                import logging
+                logging.warning(f"ML fraud check failed (non-blocking): {e}")
+        
+        # Clear user tickets cache when new ticket is created
+        cache_clear(f"tickets:user:{ticket.owner_address.lower()}")
+        cache_clear("tickets:event:")
+        # Verify event exists - try event_id first, then id
+        event_response = db.table("events").select("*").eq("event_id", ticket.event_id).execute()
+        
+        if not event_response.data:
+            # Try with id field as fallback
+            event_response = db.table("events").select("*").eq("id", ticket.event_id).execute()
+        
+        if not event_response.data:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        event = event_response.data[0]
+        event_id_actual = event.get("event_id") or event.get("id")
+        
+        # Check if tickets are still available
+        total_supply = event.get("total_supply", 0)
+        available_tickets = event.get("available_tickets", total_supply)
+        
+        if available_tickets <= 0:
+            raise HTTPException(status_code=400, detail="No tickets available for this event")
+        
+        # Get or create wallet entry
+        wallet_response = db.table("wallets").select("wallet_id").eq("address", ticket.owner_address).execute()
+        
+        if wallet_response.data:
+            wallet_id = wallet_response.data[0]["wallet_id"]
+        else:
+            # Create new wallet entry
+            wallet_insert = db.table("wallets").insert({
+                "address": ticket.owner_address,
+                "balance": 0,
+                "allowlist_status": False,
+                "blacklisted": False
+            }).execute()
+            
+            if not wallet_insert.data:
+                raise HTTPException(status_code=500, detail="Failed to create wallet entry")
+            wallet_id = wallet_insert.data[0]["wallet_id"]
+        
+        # Map frontend status to database enum
+        # Frontend: "available", "bought", "used"
+        # Database: "ACTIVE", "USED", "TRANSFERRED", "REVOKED"
+        status_map = {
+            "available": "ACTIVE",
+            "bought": "ACTIVE",  # Bought tickets are still active
+            "used": "USED"
+        }
+        db_status = status_map.get(ticket.status, "ACTIVE")
+        
+        # Create ticket - try complete schema first (owner_wallet_id)
+        ticket_data = {
+            "event_id": event_id_actual,
+            "owner_wallet_id": wallet_id,
+            "status": db_status,
+        }
+        
+        # Store purchase_price if provided (for resale markup validation)
+        if hasattr(ticket, 'purchase_price') and ticket.purchase_price is not None:
+            ticket_data["purchase_price"] = float(ticket.purchase_price)
+        elif hasattr(event, 'base_price') and event.get("base_price"):
+            # If no purchase_price provided, use event base_price as fallback
+            ticket_data["purchase_price"] = float(event.get("base_price", 0))
+        
+        # Generate token_id if not provided (required in complete schema)
+        # Use a numeric token_id for better compatibility
+        if ticket.nft_token_id:
+            ticket_data["token_id"] = str(ticket.nft_token_id)
+        else:
+            # Generate a unique numeric token_id based on timestamp
+            import time
+            import random
+            # Use timestamp in milliseconds + random to ensure uniqueness
+            numeric_token_id = int(time.time() * 1000) * 10000 + random.randint(1000, 9999)
+            ticket_data["token_id"] = str(numeric_token_id)
+        
+        try:
+            response = db.table("tickets").insert(ticket_data).execute()
+        except Exception as e:
+            # Fallback to simple schema (owner_address) if complete schema fails
+            error_str = str(e).lower()
+            if "owner_wallet_id" in error_str or "column" in error_str or "not found" in error_str:
+                # Fallback to simple schema - use string status
+                ticket_data = {
+                    "event_id": event_id_actual,
+                    "owner_address": ticket.owner_address,
+                    "status": ticket.status or "available",
+                }
+                if ticket.nft_token_id:
+                    ticket_data["nft_token_id"] = ticket.nft_token_id
+                # Store purchase_price if provided (for simple schema)
+                if hasattr(ticket, 'purchase_price') and ticket.purchase_price is not None:
+                    ticket_data["purchase_price"] = float(ticket.purchase_price)
+                elif hasattr(event, 'base_price') and event.get("base_price"):
+                    ticket_data["purchase_price"] = float(event.get("base_price", 0))
+                response = db.table("tickets").insert(ticket_data).execute()
+            else:
+                raise
+        
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to create ticket")
+        
+        created_ticket = response.data[0]
+        
+        # Decrement available tickets count
+        new_available = max(0, available_tickets - 1)
+        db.table("events").update({"available_tickets": new_available}).eq("event_id", event_id_actual).execute()
+        
+        # Map database response to TicketResponse model
+        # Handle both ticket_id and id field names
+        ticket_id = created_ticket.get("ticket_id") or created_ticket.get("id")
+        
+        # Get owner_address - either directly or from wallets table
+        owner_address = created_ticket.get("owner_address")
+        if not owner_address and "owner_wallet_id" in created_ticket:
+            # Join with wallets table to get address
+            wallet_lookup = db.table("wallets").select("address").eq("wallet_id", created_ticket["owner_wallet_id"]).execute()
+            if wallet_lookup.data:
+                owner_address = wallet_lookup.data[0]["address"]
+        
+        # Map database status back to frontend format
+        # Database: "ACTIVE", "USED", "TRANSFERRED", "REVOKED"
+        # Frontend: "available", "bought", "used"
+        db_status = created_ticket.get("status", "ACTIVE")
+        status_map_back = {
+            "ACTIVE": "available",
+            "USED": "used",
+            "TRANSFERRED": "bought",
+            "REVOKED": "used"
+        }
+        frontend_status = status_map_back.get(db_status, "available")
+        
+        # Handle nft_token_id - it should be an integer or None
+        # token_id from database is a string, try to parse it or use None
+        nft_token_id = None
+        token_id_value = created_ticket.get("nft_token_id") or created_ticket.get("token_id")
+        if token_id_value:
+            # Try to parse as integer if it's numeric, otherwise use None
+            try:
+                # If it's already an integer, use it
+                if isinstance(token_id_value, int):
+                    nft_token_id = token_id_value
+                # If it's a numeric string, parse it
+                elif isinstance(token_id_value, str):
+                    # Try to parse as integer
+                    if token_id_value.isdigit():
+                        nft_token_id = int(token_id_value)
+                    # If it's a string like "ticket_123_456", extract numeric part
+                    elif token_id_value.startswith("ticket_"):
+                        # Extract the first number after "ticket_"
+                        parts = token_id_value.split("_")
+                        if len(parts) >= 2:
+                            try:
+                                nft_token_id = int(parts[1])
+                            except (ValueError, IndexError):
+                                nft_token_id = None
+                    else:
+                        nft_token_id = None
+                else:
+                    nft_token_id = None
+            except (ValueError, TypeError):
+                nft_token_id = None
+        
+        ticket_response_data = {
+            "id": ticket_id,
+            "event_id": created_ticket.get("event_id"),
+            "owner_address": owner_address or ticket.owner_address,
+            "status": frontend_status,
+            "nft_token_id": nft_token_id,
+            "created_at": created_ticket.get("created_at")
+        }
+        
+        return TicketResponse(**ticket_response_data)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/user/{owner_address}", response_model=List[TicketResponse])
+async def get_user_tickets(
+    owner_address: str,
+    db: Client = Depends(get_supabase_admin)
+):
+    """Get all tickets owned by a specific user with caching.
+    
+    Returns an empty list if the user has no tickets (not an error).
+    This is a normal state and should be handled gracefully by the frontend.
+    """
+    # #region agent log
+    import time
+    import json
+    endpoint_start = time.time()
+    with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
+        f.write(json.dumps({"location":"tickets.py:268","message":"Endpoint start","data":{"owner_address":owner_address},"timestamp":int(endpoint_start*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H5"})+"\n")
+    # #endregion
+    
+    cache_key = f"tickets:user:{owner_address.lower()}"
+    # Enable cache for performance - cache for 30 seconds
+    cached_result = cache_get(cache_key)
+    if cached_result is not None:
+        # #region agent log
+        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"tickets.py:280","message":"Cache hit","data":{"owner_address":owner_address,"cache_key":cache_key},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
+        # #endregion
+        return cached_result
+    
+    try:
+        # Try to find wallet first (for complete schema)
+        wallet_response = db.table("wallets").select("wallet_id").eq("address", owner_address).execute()
+        
+        if wallet_response.data:
+            # Use owner_wallet_id (complete schema)
+            wallet_id = wallet_response.data[0]["wallet_id"]
+            # Select all columns - Supabase will return what exists
+            response = db.table("tickets").select("*").eq("owner_wallet_id", wallet_id).execute()
+        else:
+            # Try owner_address directly (simple schema)
+            # Select all columns - Supabase will return what exists
+            response = db.table("tickets").select("*").eq("owner_address", owner_address).execute()
+        
+        # CRITICAL: Return empty array if no tickets found (not an error)
+        if not response.data or len(response.data) == 0:
+            return []
+        
+        # Batch fetch all event_ids from tickets to verify they exist
+        ticket_event_ids = []
+        for ticket in response.data:
+            event_id = ticket.get("event_id")
+            if event_id is not None and event_id != 0:
+                ticket_event_ids.append(event_id)
+        
+        # Verify events exist and fetch event names - OPTIMIZED: batch fetch all events at once
+        existing_event_ids = set()
+        event_names_map = {}  # Map event_id to event name
+        if ticket_event_ids:
+            unique_event_ids = list(set(ticket_event_ids))
+            
+            # OPTIMIZATION: Fetch all events in a single query using 'in' operator (Supabase supports this)
+            try:
+                # Try fetching by event_id column first (primary schema)
+                event_check = db.table("events").select("event_id, name").in_("event_id", unique_event_ids).execute()
+                if event_check.data:
+                    for event in event_check.data:
+                        event_id = event.get("event_id")
+                        if event_id:
+                            existing_event_ids.add(event_id)
+                            event_names_map[event_id] = event.get("name", "Unknown Event")
+                
+                # For any missing event_ids, try with 'id' column (alternative schema)
+                missing_ids = [eid for eid in unique_event_ids if eid not in existing_event_ids]
+                if missing_ids:
+                    event_check_id = db.table("events").select("id, name").in_("id", missing_ids).execute()
+                    if event_check_id.data:
+                        for event in event_check_id.data:
+                            event_id = event.get("id")
+                            if event_id:
+                                existing_event_ids.add(event_id)
+                                event_names_map[event_id] = event.get("name", "Unknown Event")
+            except Exception as e:
+                import logging
+                logging.warning(f"Error batch fetching events: {e}")
+                # Fallback to individual queries if batch fails
+                for event_id in unique_event_ids:
+                    try:
+                        event_check = db.table("events").select("event_id, name").eq("event_id", event_id).limit(1).execute()
+                        if event_check.data:
+                            existing_event_ids.add(event_id)
+                            event_names_map[event_id] = event_check.data[0].get("name", "Unknown Event")
+                        else:
+                            event_check = db.table("events").select("id, name").eq("id", event_id).limit(1).execute()
+                            if event_check.data:
+                                existing_event_ids.add(event_id)
+                                event_names_map[event_id] = event_check.data[0].get("name", "Unknown Event")
+                    except Exception as query_error:
+                        logging.warning(f"Error checking event {event_id}: {query_error}")
+        
+        # Map database response to TicketResponse model
+        tickets = []
+        for ticket in response.data:
+            # Get ticket_id - handle both ticket_id and id columns
+            ticket_id = ticket.get("ticket_id") or ticket.get("id")
+            if not ticket_id:
+                import logging
+                logging.warning(f"Ticket missing ID. Ticket data: {ticket}")
+                continue
+            
+            # Get event_id - this is critical!
+            event_id = ticket.get("event_id")
+            if event_id is None:
+                # Log warning if event_id is missing but don't skip - use 0 as fallback
+                import logging
+                logging.warning(f"Ticket {ticket_id} is missing event_id. Available columns: {list(ticket.keys())}")
+                event_id = 0  # Use 0 as fallback instead of skipping
+            elif event_id != 0 and event_id not in existing_event_ids:
+                # Log warning if event doesn't exist
+                import logging
+                logging.warning(f"Ticket {ticket_id} has event_id {event_id} but event does not exist in database!")
+            
+            # Get owner_address - either directly or from wallets table
+            ticket_owner_address = ticket.get("owner_address")
+            # Note: We already have owner_address from the query, so skip wallet lookup to avoid N+1
+            # If owner_address is missing, use the parameter (already available)
+            if not ticket_owner_address:
+                ticket_owner_address = owner_address
+            
+            # Map database status to frontend format
+            db_status = ticket.get("status", "ACTIVE")
+            status_map_back = {
+                "ACTIVE": "available",
+                "USED": "used",
+                "TRANSFERRED": "bought",
+                "REVOKED": "used"
+            }
+            frontend_status = status_map_back.get(db_status, "available")
+            
+            # Handle nft_token_id - parse from token_id if needed
+            nft_token_id = None
+            token_id_value = ticket.get("nft_token_id") or ticket.get("token_id")
+            if token_id_value:
+                try:
+                    if isinstance(token_id_value, int):
+                        nft_token_id = token_id_value
+                    elif isinstance(token_id_value, str) and token_id_value.isdigit():
+                        nft_token_id = int(token_id_value)
+                except (ValueError, TypeError):
+                    nft_token_id = None
+            
+            # Create ticket response with all required fields
+            # Ensure event_id is an integer
+            try:
+                event_id_int = int(event_id) if event_id is not None else 0
+            except (ValueError, TypeError):
+                event_id_int = 0
+            
+            # Debug: Log ticket event_id
+            import logging
+            logging.info(f"Ticket {ticket_id} has event_id: {event_id_int} (from DB: {event_id})")
+            
+            # Get event name if available
+            event_name = event_names_map.get(event_id_int)
+            
+            # Debug logging
+            if event_id_int and event_id_int != 0:
+                import logging
+                if event_name:
+                    logging.info(f"Ticket {ticket_id} -> Event {event_id_int}: '{event_name}'")
+                else:
+                    logging.warning(f"Ticket {ticket_id} -> Event {event_id_int}: No event name found in map. Available event_ids in map: {list(event_names_map.keys())}")
+            
+            ticket_response = TicketResponse(
+                id=ticket_id,
+                event_id=event_id_int,  # Now guaranteed to be an integer
+                owner_address=ticket_owner_address or owner_address,
+                status=frontend_status,
+                nft_token_id=nft_token_id,
+                created_at=ticket.get("created_at"),
+                event_name=event_name  # Include event name for easier frontend display
+            )
+            
+            tickets.append(ticket_response)
+        
+        # Return all tickets - let frontend decide how to handle tickets without events
+        # Some tickets might have event_id = 0 if the event was deleted or not set
+        result = tickets
+        # Cache for 30 seconds (balance between freshness and performance)
+        cache_set(cache_key, result, ttl=30)
+        
+        # #region agent log
+        total_duration = (time.time() - endpoint_start) * 1000
+        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"tickets.py:420","message":"Endpoint complete (success)","data":{"owner_address":owner_address,"ticket_count":len(tickets),"total_duration_ms":total_duration},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
+        # #endregion
+        
+        return result
+    
+    except Exception as e:
+        # #region agent log
+        total_duration = (time.time() - endpoint_start) * 1000
+        import traceback
+        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"tickets.py:465","message":"Endpoint error","data":{"owner_address":owner_address,"error":str(e),"error_type":type(e).__name__,"total_duration_ms":total_duration,"traceback":traceback.format_exc()[:500]},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
+        # #endregion
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/event/{event_id}", response_model=List[TicketResponse])
+async def get_event_tickets(
+    event_id: int,
+    db: Client = Depends(get_supabase_admin)
+):
+    """Get all tickets for a specific event."""
+    try:
+        response = db.table("tickets").select("*").eq("event_id", event_id).execute()
+        
+        # Map database response to TicketResponse model
+        tickets = []
+        for ticket in response.data:
+            ticket_id = ticket.get("ticket_id") or ticket.get("id")
+            # Map database status to frontend format
+            db_status = ticket.get("status", "ACTIVE")
+            status_map_back = {
+                "ACTIVE": "available",
+                "USED": "used",
+                "TRANSFERRED": "bought",
+                "REVOKED": "used"
+            }
+            frontend_status = status_map_back.get(db_status, "available")
+            
+            # Handle nft_token_id - parse from token_id if needed
+            nft_token_id = None
+            token_id_value = ticket.get("nft_token_id") or ticket.get("token_id")
+            if token_id_value:
+                try:
+                    if isinstance(token_id_value, int):
+                        nft_token_id = token_id_value
+                    elif isinstance(token_id_value, str) and token_id_value.isdigit():
+                        nft_token_id = int(token_id_value)
+                except (ValueError, TypeError):
+                    nft_token_id = None
+            
+            tickets.append(TicketResponse(
+                id=ticket_id,
+                event_id=ticket.get("event_id"),
+                owner_address=ticket.get("owner_address"),
+                status=frontend_status,
+                nft_token_id=nft_token_id,
+                created_at=ticket.get("created_at")
+            ))
+        
+        return tickets
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{ticket_id}", response_model=TicketResponse)
+async def get_ticket(
+    ticket_id: int,
+    db: Client = Depends(get_supabase_admin)
+):
+    """Get a specific ticket by ID."""
+    try:
+        # Try ticket_id first, then id
+        response = db.table("tickets").select("*").eq("ticket_id", ticket_id).execute()
+        
+        if not response.data:
+            response = db.table("tickets").select("*").eq("id", ticket_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        
+        ticket = response.data[0]
+        ticket_id_actual = ticket.get("ticket_id") or ticket.get("id")
+        
+        # Get event_id and fetch event name
+        event_id = ticket.get("event_id")
+        event_name = None
+        if event_id:
+            try:
+                event_response = db.table("events").select("event_id, name").eq("event_id", event_id).limit(1).execute()
+                if not event_response.data:
+                    event_response = db.table("events").select("id, name").eq("id", event_id).limit(1).execute()
+                if event_response.data:
+                    event_name = event_response.data[0].get("name")
+            except Exception:
+                pass
+        
+        # Get owner_address - either directly or from wallets table
+        owner_address = ticket.get("owner_address")
+        if not owner_address and "owner_wallet_id" in ticket:
+            try:
+                wallet_lookup = db.table("wallets").select("address").eq("wallet_id", ticket["owner_wallet_id"]).limit(1).execute()
+                if wallet_lookup.data:
+                    owner_address = wallet_lookup.data[0].get("address")
+            except Exception:
+                # If wallet lookup fails, use a placeholder
+                owner_address = None
+        
+        # Map database status to frontend format
+        db_status = ticket.get("status", "ACTIVE")
+        status_map_back = {
+            "ACTIVE": "available",
+            "USED": "used",
+            "TRANSFERRED": "bought",
+            "REVOKED": "used"
+        }
+        frontend_status = status_map_back.get(db_status, "available")
+        
+        # Handle nft_token_id - parse from token_id if needed
+        nft_token_id = None
+        token_id_value = ticket.get("nft_token_id") or ticket.get("token_id")
+        if token_id_value:
+            try:
+                if isinstance(token_id_value, int):
+                    nft_token_id = token_id_value
+                elif isinstance(token_id_value, str) and token_id_value.isdigit():
+                    nft_token_id = int(token_id_value)
+            except (ValueError, TypeError):
+                nft_token_id = None
+        
+        return TicketResponse(
+            id=ticket_id_actual,
+            event_id=ticket.get("event_id"),
+            owner_address=owner_address or "unknown",
+            status=frontend_status,
+            nft_token_id=nft_token_id,
+            created_at=ticket.get("created_at"),
+            event_name=event_name  # Include event name for easier frontend display
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Failed to get ticket: {str(e)}\n{traceback.format_exc()}"
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@router.patch("/{ticket_id}/transfer")
+async def transfer_ticket(
+    ticket_id: int,
+    new_owner_address: str,
+    db: Client = Depends(get_supabase_admin)
+):
+    """Transfer ticket to a new owner."""
+    try:
+        response = db.table("tickets").update({"owner_address": new_owner_address}).eq("id", ticket_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        
+        return {"message": "Ticket transferred successfully", "ticket": response.data[0]}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/{ticket_id}/use")
+async def use_ticket(
+    ticket_id: int,
+    db: Client = Depends(get_supabase_admin)
+):
+    """Mark ticket as used."""
+    try:
+        # Map frontend "used" to database "USED"
+        response = db.table("tickets").update({"status": "USED"}).eq("id", ticket_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        
+        return {"message": "Ticket marked as used", "ticket": response.data[0]}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@router.post("/approve-marketplace")
+def approve_marketplace():
+    """Approve the marketplace contract to transfer tickets."""
+    nft_contract = contracts.get("NFT_TICKET")
+    marketplace_contract = contracts.get("MarketPlace")
+    
+    if not nft_contract or not marketplace_contract:
+        raise HTTPException(status_code=404, detail="Contracts not found")
+        
+    # Check for setApprovalForAll
+    if hasattr(nft_contract.functions, 'setApprovalForAll'):
+        func = nft_contract.functions.setApprovalForAll(marketplace_contract.address, True)
+    else:
+        raise HTTPException(status_code=500, detail="setApprovalForAll not found")
+        
+    return send_transaction(func)
+
+
+# --- Blockchain Endpoints ---
+
+
+@router.post("/mint")
+def mint_ticket(
+    req: MintRequest,
+    db: Client = Depends(get_supabase_admin)
+):
+    contract = contracts.get("NFT_TICKET")
+    if not contract:
+        raise HTTPException(status_code=404, detail="NFT_TICKET contract not found")
+        
+    # Check for 'mint' or 'createTicket'
+    if hasattr(contract.functions, 'mint'):
+        func = contract.functions.mint(Web3.to_checksum_address(req.to_address), req.event_id, req.token_uri)
+    elif hasattr(contract.functions, 'createTicket'):
+        func = contract.functions.createTicket(req.token_uri, w3.to_wei(req.price, 'ether'))
+    else:
+        # Fallback or error if neither exists, but let's assume one does based on user intent
+        raise HTTPException(status_code=500, detail="Mint function not found in ABI")
+
+    tx_result = send_transaction(func)
+    
+    if tx_result["status"] == 1:
+        # Transaction successful, save to DB
+        try:
+            # Fetch receipt to get Token ID
+            try:
+                receipt = w3.eth.get_transaction_receipt(tx_result["tx_hash"])
+                # Assuming Transfer(from, to, tokenId) event
+                # We need to find the log from the NFT contract
+                logs = contract.events.Transfer().process_receipt(receipt)
+                if logs:
+                    token_id = logs[0]['args']['tokenId']
+                    print(f"Minted Token ID: {token_id}")
+                else:
+                    print("No Transfer logs found in receipt")
+                    token_id = None
+            except Exception as e:
+                print(f"Error parsing logs: {e}")
+                token_id = None
+
+            ticket_data = {
+                "event_id": req.event_id,
+                "owner_address": req.to_address,
+                "status": "available",
+                "nft_token_id": token_id
+            }
+            print(f"Inserting ticket data: {ticket_data}")
+            response = db.table("tickets").insert(ticket_data).execute()
+            print(f"DB Insert Response: {response}")
+        except Exception as e:
+            print(f"DB Error: {e}")
+            # Don't fail the request if DB fails, but maybe log it?
+            # Or should we fail? User wants it in DB.
+            # Let's include a warning in response.
+            tx_result["db_error"] = str(e)
+            
+    return tx_result
+
+@router.post("/validators/add")
+def add_validator(req: ValidatorRequest):
+    contract = contracts.get("NFT_TICKET")
+    val_contract = contracts.get("TicketValidator")
+    
+    if contract and hasattr(contract.functions, 'addValidator'):
+        func = contract.functions.addValidator(req.validator_address)
+    elif val_contract and hasattr(val_contract.functions, 'addValidator'):
+        func = val_contract.functions.addValidator(req.validator_address)
+    else:
+         raise HTTPException(status_code=500, detail="addValidator function not found")
+             
+    return send_transaction(func)
+
+@router.post("/validators/remove")
+def remove_validator(req: ValidatorRequest):
+    contract = contracts.get("NFT_TICKET")
+    val_contract = contracts.get("TicketValidator")
+    
+    if contract and hasattr(contract.functions, 'removeValidator'):
+        func = contract.functions.removeValidator(req.validator_address)
+    elif val_contract and hasattr(val_contract.functions, 'removeValidator'):
+        func = val_contract.functions.removeValidator(req.validator_address)
+    else:
+        raise HTTPException(status_code=500, detail="removeValidator function not found")
+        
+    return send_transaction(func)
+
+@router.post("/validate")
+def validate_ticket(req: ValidateRequest):
+    contract = contracts.get("NFT_TICKET")
+    val_contract = contracts.get("TicketValidator")
+    
+    target_contract = val_contract if val_contract else contract
+    if not target_contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+
+    if hasattr(target_contract.functions, 'validateTicket'):
+        func = target_contract.functions.validateTicket(req.ticket_id)
+        return send_transaction(func)
+    else:
+         raise HTTPException(status_code=500, detail="validateTicket function not found")
+

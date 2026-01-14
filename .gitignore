@@ -1,0 +1,12 @@
+.env
+venv/
+__pycache__/
+*.pyc
+logs/
+.coverage
+.wrangler/
+.wranglerignore
+wrangler.toml
+passenger_wsgi.py
+requirements-worker.txt
+requirements-test.txt
