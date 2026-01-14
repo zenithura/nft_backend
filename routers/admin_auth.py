@@ -23,6 +23,7 @@ router = APIRouter(prefix="/admin", tags=["Admin Auth"])
 # Admin credentials from environment (default fallback)
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
 # JWT Configuration for admin tokens
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", os.getenv("ADMIN_JWT_SECRET", "change-this-secret-key"))
@@ -51,6 +52,7 @@ class AdminLoginRequest(BaseModel):
 class AdminLoginResponse(BaseModel):
     success: bool
     message: str
+    access_token: Optional[str] = None
     admin: Optional[dict] = None
 
 
@@ -292,11 +294,14 @@ async def admin_login(
     
     # Check against configured admin credentials
     if username == ADMIN_USERNAME:
-        # Verify password against hash
-        if ADMIN_PASSWORD_HASH:
+        # 1. Check plaintext password (if configured) - Requested by user
+        if ADMIN_PASSWORD:
+             is_valid = (password == ADMIN_PASSWORD)
+        # 2. Verify password against hash
+        elif ADMIN_PASSWORD_HASH:
             is_valid = verify_password(password, ADMIN_PASSWORD_HASH)
         else:
-            # Fallback to default password (for initial setup)
+            # 3. Fallback to default password (for initial setup)
             is_valid = (password == DEFAULT_ADMIN_PASSWORD)
     
     if not is_valid:
@@ -309,12 +314,12 @@ async def admin_login(
     # Success - create token and set cookie
     token = create_admin_token(username)
     
-    # Determine cookie settings based on environment
-    # Default to production settings (Secure/None) if not specified
+    # Determine cookie settings
+    # With Cloudflare Proxy preventing cross-origin issues, 'Lax' is safer and more reliable
     is_production = os.getenv("ENVIRONMENT", "production").lower() == "production"
     
     cookie_secure = is_production
-    cookie_samesite = "none" if is_production else "lax"
+    cookie_samesite = "lax"  # Changed from logic that defaulted to 'none' in prod
     
     # Allow explicit override for local dev testing with different ports
     if os.getenv("COOKIE_SECURE") == "False":
@@ -336,6 +341,7 @@ async def admin_login(
     return AdminLoginResponse(
         success=True,
         message="Login successful",
+        access_token=token,  # Return token for frontend storage (fallback for cookies)
         admin={
             "username": username,
             "role": "ADMIN",
@@ -351,6 +357,12 @@ async def check_admin_session(
     """Check if admin session is valid."""
     # Get token from cookie
     token = request.cookies.get("admin_token")
+    
+    # Fallback: Get token from Authorization header
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
     
     if not token:
         return AdminSessionResponse(authenticated=False)
@@ -376,7 +388,7 @@ async def admin_logout(response: Response):
     is_production = os.getenv("ENVIRONMENT", "production").lower() == "production"
     
     cookie_secure = is_production
-    cookie_samesite = "none" if is_production else "lax"
+    cookie_samesite = "lax"
     
     if os.getenv("COOKIE_SECURE") == "False":
         cookie_secure = False
@@ -396,6 +408,12 @@ async def admin_logout(response: Response):
 def get_admin_user(request: Request, db: Client = Depends(get_supabase_admin)) -> dict:
     """Dependency to get current admin user from session."""
     token = request.cookies.get("admin_token")
+    
+    # Fallback: Get token from Authorization header
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
     
     if not token:
         raise HTTPException(
