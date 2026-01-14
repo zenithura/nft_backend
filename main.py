@@ -72,6 +72,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=r"https://.*\.pages\.dev",  # Allow all Cloudflare Pages subdomains (admin, main, previews)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
