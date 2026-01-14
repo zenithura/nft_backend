@@ -2,7 +2,9 @@
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import os
+import re
 from dotenv import load_dotenv
 
 from routers import auth, events, tickets, marketplace, admin, admin_auth, wallet, ml_services_backend as ml_services, chatbot
@@ -35,34 +37,38 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Configure CORS
-# Default origins include localhost and common local network IPs
-# Admin panel runs on port 4201 with non-guessable path
-# Note: In development, allow all origins from local network (0.0.0.0/16 or specific IPs)
-default_origins = "http://localhost:5173,http://localhost:3000,http://localhost:4201,https://main.nft-ticketing-frontend.pages.dev,https://nft-ticketing-frontend.pages.dev"
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", default_origins).split(",")
-# Strip whitespace from origins
-CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS]
+# --- CORS and Middleware Configuration ---
 
-# In development, allow any local network IP (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
-# This allows accessing from different devices on the same network
-if os.getenv("ENVIRONMENT", "development") == "development":
-    # Allow localhost and local network IPs on common ports
-    import re
-    def is_local_network(origin: str) -> bool:
-        """Check if origin is from local network."""
-        local_patterns = [
-            r'^http://localhost:\d+$',
-            r'^http://127\.0\.0\.1:\d+$',
-            r'^http://192\.168\.\d+\.\d+:\d+$',
-            r'^http://10\.\d+\.\d+\.\d+:\d+$',
-            r'^http://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+$',
-        ]
-        return any(re.match(pattern, origin) for pattern in local_patterns)
-    
-    # Add check function for dynamic CORS
-    # For now, just ensure the network IPs are in the list
-    pass
+# Calculate CORS Origins
+default_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:4201",
+    "https://main.nft-ticketing-frontend.pages.dev",
+    "https://nft-ticketing-frontend.pages.dev"
+]
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
+CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS if origin.strip()]
+if not CORS_ORIGINS:
+    CORS_ORIGINS = default_origins
+
+# Middlewares are executed in reverse order of addition (LIFO for add_middleware)
+# So the first one in this list to run is the LAST one added.
+
+# 5. Add security middleware (Inner)
+app.add_middleware(BaseHTTPMiddleware, dispatch=security_middleware)
+
+# 4. Add web requests logging middleware
+app.add_middleware(WebRequestsMiddleware, exclude_paths=['/health', '/metrics', '/docs', '/redoc', '/openapi.json'])
+
+# 3. Add metrics middleware for Prometheus
+app.add_middleware(MetricsMiddleware)
+
+# 2. Add response compression (gzip)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# 1. CRITICAL: CORSMiddleware MUST be the first to run for preflight requests.
+# Being last in the add_middleware sequence makes it the outermost middleware.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -70,18 +76,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Add response compression (gzip) - reduces payload size by 70-90%
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-
-# Add metrics middleware for Prometheus
-app.add_middleware(MetricsMiddleware)
-
-# Add web requests logging middleware (must be before security middleware)
-app.add_middleware(WebRequestsMiddleware, exclude_paths=['/health', '/metrics', '/docs', '/redoc', '/openapi.json'])
-
-# Add security middleware (must be before routers)
-app.middleware("http")(security_middleware)
 
 # Include routers with /api prefix
 app.include_router(auth.router, prefix="/api")

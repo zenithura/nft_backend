@@ -34,8 +34,8 @@ class WebRequestsMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next):
         """Process request and log it."""
-        # Skip excluded paths
-        if any(request.url.path.startswith(path) for path in self.exclude_paths):
+        # Skip excluded paths or OPTIONS requests (preflight)
+        if request.method == "OPTIONS" or any(request.url.path.startswith(path) for path in self.exclude_paths):
             return await call_next(request)
         
         # Get request start time

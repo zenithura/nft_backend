@@ -426,8 +426,11 @@ async def security_middleware(request: Request, call_next):
     """Main security middleware that detects attacks."""
     db = get_supabase_admin()
     
+    # Skip security checks for OPTIONS requests to allow CORS preflight
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     # Get client info
-    ip_address = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "unknown")
     
     # Check if IP or user is banned
