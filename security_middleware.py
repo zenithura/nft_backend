@@ -431,6 +431,7 @@ async def security_middleware(request: Request, call_next):
         return await call_next(request)
 
     # Get client info
+    ip_address = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "unknown")
     
     # Check if IP or user is banned
