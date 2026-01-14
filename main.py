@@ -45,7 +45,8 @@ default_origins = [
     "http://localhost:3000",
     "http://localhost:4201",
     "https://main.nft-ticketing-frontend.pages.dev",
-    "https://nft-ticketing-frontend.pages.dev"
+    "https://nft-ticketing-frontend.pages.dev",
+    "https://nft-ticketing-admin.pages.dev"
 ]
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
 CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS if origin.strip()]
