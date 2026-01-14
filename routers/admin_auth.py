@@ -23,7 +23,7 @@ router = APIRouter(prefix="/admin", tags=["Admin Auth"])
 # Admin credentials from environment (default fallback)
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin")
 
 # JWT Configuration for admin tokens
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", os.getenv("ADMIN_JWT_SECRET", "change-this-secret-key"))
