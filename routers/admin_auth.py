@@ -309,22 +309,23 @@ async def admin_login(
     # Success - create token and set cookie
     token = create_admin_token(username)
     
-    # Set secure HTTP-only cookie
-    # For cross-site usage (Cloudflare -> Render), we MUST use:
-    # secure=True (HTTPS required)
-    # samesite="none" (Allow cross-site)
-    # For cross-site usage (Cloudflare -> Render), we MUST use:
-    # secure=True (HTTPS required)
-    # samesite="none" (Allow cross-site)
-    # We force this to True for now to solve the cross-site issue on deployed envs.
-    # Localhost developers might need to use HTTPS or ignore this locally.
+    # Determine cookie settings based on environment
+    # Default to production settings (Secure/None) if not specified
+    is_production = os.getenv("ENVIRONMENT", "production").lower() == "production"
+    
+    cookie_secure = is_production
+    cookie_samesite = "none" if is_production else "lax"
+    
+    # Allow explicit override for local dev testing with different ports
+    if os.getenv("COOKIE_SECURE") == "False":
+        cookie_secure = False
     
     response.set_cookie(
         key="admin_token",
         value=token,
         httponly=True,
-        secure=True, 
-        samesite="none", 
+        secure=cookie_secure, 
+        samesite=cookie_samesite, 
         max_age=ADMIN_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -371,15 +372,21 @@ async def check_admin_session(
 @router.post("/logout")
 async def admin_logout(response: Response):
     """Admin logout endpoint."""
+    # Determine cookie settings based on environment (must match set_cookie)
+    is_production = os.getenv("ENVIRONMENT", "production").lower() == "production"
+    
+    cookie_secure = is_production
+    cookie_samesite = "none" if is_production else "lax"
+    
+    if os.getenv("COOKIE_SECURE") == "False":
+        cookie_secure = False
+
     # Clear admin token cookie
-    # Clear admin token cookie
-    # Clear admin token cookie
-    # Must match the setting of the set_cookie
     response.delete_cookie(
         key="admin_token",
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=cookie_secure,
+        samesite=cookie_samesite,
         path="/",
     )
     
