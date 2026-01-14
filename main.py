@@ -39,7 +39,7 @@ app = FastAPI(
 # Default origins include localhost and common local network IPs
 # Admin panel runs on port 4201 with non-guessable path
 # Note: In development, allow all origins from local network (0.0.0.0/16 or specific IPs)
-default_origins = "http://localhost:5173,http://localhost:3000,http://localhost:4201,http://10.230.33.197:3000,http://192.168.100.12:5173,http://192.168.100.12:4201"
+default_origins = "http://localhost:5173,http://localhost:3000,http://localhost:4201,https://main.nft-ticketing-frontend.pages.dev,https://nft-ticketing-frontend.pages.dev"
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", default_origins).split(",")
 # Strip whitespace from origins
 CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS]
