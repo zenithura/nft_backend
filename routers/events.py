@@ -175,22 +175,13 @@ async def list_events(
     db: Client = Depends(get_supabase_admin)
 ):
     """List events with pagination. Default: limit=20, skip=0."""
-    # #region agent log
-    import time
-    import json
-    endpoint_start = time.time()
-    with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({"location":"events.py:178","message":"List events endpoint start","data":{"skip":skip,"limit":limit},"timestamp":int(endpoint_start*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H5"})+"\n")
-    # #endregion
+
     
     cache_key = "events:list"
     cached_result = cache_get(cache_key)
     # Return cached result if available
     if cached_result is not None:
-        # #region agent log
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"events.py:187","message":"Events cache hit","data":{"cache_key":cache_key},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         return cached_result
     
     try:
@@ -303,11 +294,7 @@ async def list_events(
         # Cache for 2 minutes (events don't change frequently)
         cache_set(cache_key, result, ttl=120)
         
-        # #region agent log
-        total_duration = (time.time() - endpoint_start) * 1000
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"events.py:294","message":"List events complete","data":{"event_count":len(result),"total_duration_ms":total_duration},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         
         # Note: Headers are set via FastAPI middleware or client-side caching
         # Cache-Control headers are handled by the HTTP layer
@@ -317,12 +304,7 @@ async def list_events(
     except HTTPException:
         raise
     except Exception as e:
-        # #region agent log
-        total_duration = (time.time() - endpoint_start) * 1000
-        import traceback
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"events.py:306","message":"List events error","data":{"error":str(e),"total_duration_ms":total_duration},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         import traceback
         error_detail = f"Failed to list events: {str(e)}\n{traceback.format_exc()}"
         raise HTTPException(status_code=500, detail=error_detail)

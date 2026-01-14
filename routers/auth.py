@@ -585,12 +585,7 @@ async def get_current_user_info(
     user: dict = Depends(get_current_user)
 ):
     """Get current authenticated user information."""
-    # #region agent log
-    import time
-    import json
-    with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({"location":"auth.py:584","message":"Auth me endpoint called","data":{"user_id":user.get("user_id")},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H5"})+"\n")
-    # #endregion
+
     
     return UserResponse(
         user_id=user["user_id"],

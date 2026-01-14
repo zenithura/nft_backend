@@ -275,22 +275,13 @@ async def get_user_tickets(
     Returns an empty list if the user has no tickets (not an error).
     This is a normal state and should be handled gracefully by the frontend.
     """
-    # #region agent log
-    import time
-    import json
-    endpoint_start = time.time()
-    with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({"location":"tickets.py:268","message":"Endpoint start","data":{"owner_address":owner_address},"timestamp":int(endpoint_start*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H5"})+"\n")
-    # #endregion
+
     
     cache_key = f"tickets:user:{owner_address.lower()}"
     # Enable cache for performance - cache for 30 seconds
     cached_result = cache_get(cache_key)
     if cached_result is not None:
-        # #region agent log
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"tickets.py:280","message":"Cache hit","data":{"owner_address":owner_address,"cache_key":cache_key},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         return cached_result
     
     try:
@@ -454,21 +445,12 @@ async def get_user_tickets(
         # Cache for 30 seconds (balance between freshness and performance)
         cache_set(cache_key, result, ttl=30)
         
-        # #region agent log
-        total_duration = (time.time() - endpoint_start) * 1000
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"tickets.py:420","message":"Endpoint complete (success)","data":{"owner_address":owner_address,"ticket_count":len(tickets),"total_duration_ms":total_duration},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         
         return result
     
     except Exception as e:
-        # #region agent log
-        total_duration = (time.time() - endpoint_start) * 1000
-        import traceback
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"tickets.py:465","message":"Endpoint error","data":{"owner_address":owner_address,"error":str(e),"error_type":type(e).__name__,"total_duration_ms":total_duration,"traceback":traceback.format_exc()[:500]},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         raise HTTPException(status_code=500, detail=str(e))
 
 

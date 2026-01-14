@@ -16,13 +16,7 @@ async def get_current_user(
     db: Client = Depends(get_supabase_admin)
 ) -> dict:
     """Get current authenticated user from JWT token."""
-    # #region agent log
-    import time
-    import json
-    middleware_start = time.time()
-    with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({"location":"auth_middleware.py:13","message":"get_current_user start","data":{},"timestamp":int(middleware_start*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H5"})+"\n")
-    # #endregion
+
     
     token = credentials.credentials
     payload = verify_token(token, token_type="access")
@@ -46,10 +40,7 @@ async def get_current_user(
         cache_key = f"user:{user_id}"
         cached_user = cache_get(cache_key)
         if cached_user is not None:
-            # #region agent log
-            with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({"location":"auth_middleware.py:44","message":"User cache hit","data":{"user_id":user_id},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-            # #endregion
+
             # Still check if user is active (cached users might become inactive)
             if not cached_user.get("is_active", True):
                 raise HTTPException(
@@ -58,19 +49,11 @@ async def get_current_user(
                 )
             return cached_user
         
-        # #region agent log
-        db_query_start = time.time()
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"auth_middleware.py:56","message":"User DB query start","data":{"user_id":user_id},"timestamp":int(db_query_start*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         
         response = db.table("users").select("*").eq("user_id", int(user_id)).execute()
         
-        # #region agent log
-        db_query_duration = (time.time() - db_query_start) * 1000
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"auth_middleware.py:60","message":"User DB query complete","data":{"user_id":user_id,"duration_ms":db_query_duration,"found":bool(response.data)},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         
         if not response.data:
             raise HTTPException(
@@ -90,18 +73,11 @@ async def get_current_user(
         # Cache user for 60 seconds (user data doesn't change frequently)
         cache_set(cache_key, user, ttl=60)
         
-        # #region agent log
-        total_duration = (time.time() - middleware_start) * 1000
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"auth_middleware.py:69","message":"get_current_user complete","data":{"user_id":user_id,"total_duration_ms":total_duration},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         
         return user
     except ValueError:
-        # #region agent log
-        with open('/home/eniac/Desktop/NFT-TICKETING/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"auth_middleware.py:76","message":"get_current_user ValueError","data":{"user_id":user_id},"timestamp":int(time.time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H1"})+"\n")
-        # #endregion
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid user ID"
