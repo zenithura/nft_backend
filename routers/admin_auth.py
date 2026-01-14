@@ -313,14 +313,18 @@ async def admin_login(
     # For cross-site usage (Cloudflare -> Render), we MUST use:
     # secure=True (HTTPS required)
     # samesite="none" (Allow cross-site)
-    is_production = os.getenv("ENVIRONMENT", "development") == "production"
+    # For cross-site usage (Cloudflare -> Render), we MUST use:
+    # secure=True (HTTPS required)
+    # samesite="none" (Allow cross-site)
+    # We force this to True for now to solve the cross-site issue on deployed envs.
+    # Localhost developers might need to use HTTPS or ignore this locally.
     
     response.set_cookie(
         key="admin_token",
         value=token,
         httponly=True,
-        secure=True if is_production else False,  # HTTPS required for SameSite=None
-        samesite="none" if is_production else "lax",  # "none" is required for cross-site
+        secure=True, 
+        samesite="none", 
         max_age=ADMIN_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -369,12 +373,13 @@ async def admin_logout(response: Response):
     """Admin logout endpoint."""
     # Clear admin token cookie
     # Clear admin token cookie
-    is_production = os.getenv("ENVIRONMENT", "development") == "production"
+    # Clear admin token cookie
+    # Must match the setting of the set_cookie
     response.delete_cookie(
         key="admin_token",
         httponly=True,
-        secure=True if is_production else False,
-        samesite="none" if is_production else "lax",
+        secure=True,
+        samesite="none",
         path="/",
     )
     
