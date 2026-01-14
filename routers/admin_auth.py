@@ -310,15 +310,17 @@ async def admin_login(
     token = create_admin_token(username)
     
     # Set secure HTTP-only cookie
-    # In production, set secure=True (HTTPS only)
-    # In development, set secure=False for localhost
+    # For cross-site usage (Cloudflare -> Render), we MUST use:
+    # secure=True (HTTPS required)
+    # samesite="none" (Allow cross-site)
     is_production = os.getenv("ENVIRONMENT", "development") == "production"
+    
     response.set_cookie(
         key="admin_token",
         value=token,
         httponly=True,
-        secure=is_production,  # HTTPS only in production
-        samesite="lax" if not is_production else "strict",  # Use "lax" for cross-origin in dev
+        secure=True if is_production else False,  # HTTPS required for SameSite=None
+        samesite="none" if is_production else "lax",  # "none" is required for cross-site
         max_age=ADMIN_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -366,12 +368,13 @@ async def check_admin_session(
 async def admin_logout(response: Response):
     """Admin logout endpoint."""
     # Clear admin token cookie
+    # Clear admin token cookie
     is_production = os.getenv("ENVIRONMENT", "development") == "production"
     response.delete_cookie(
         key="admin_token",
         httponly=True,
-        secure=is_production,
-        samesite="lax" if not is_production else "strict",  # Use "lax" for cross-origin in dev
+        secure=True if is_production else False,
+        samesite="none" if is_production else "lax",
         path="/",
     )
     
