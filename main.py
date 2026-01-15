@@ -48,7 +48,10 @@ default_origins = [
     "https://nft-ticketing-frontend.pages.dev",
     "https://nft-ticketing-admin.pages.dev",
     "https://nftix-online.pages.dev",
-    "https://nftix-online-admin.pages.dev"
+    "https://nftix-online-admin.pages.dev",
+    "https://nftix.online",
+    "https://www.nftix.online",
+    "https://admin.nftix.online"
 ]
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
 CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS if origin.strip()]
